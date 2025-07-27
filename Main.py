@@ -10,9 +10,6 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from urllib.parse import urljoin
 
-# ✅ This must be FIRST Streamlit command
-st.set_page_config(page_title="📧 Smart Email + Social Extractor", layout="centered")
-
 # Load CSS
 def load_css():
     try:
@@ -253,13 +250,13 @@ def prepare_download_data(results):
 # if st.sidebar.button("Recover Previous Data"):
 #     prev_data = load_from_local_storage()
 #     if prev_data:
-#         st.success("✅ Recovered previous session")
+#         st.success("Recovered previous session")
 #         recovered_df = pd.DataFrame(prev_data)
 #         st.dataframe(recovered_df)
 
 #         # Download button for recovered data
 #         st.download_button(
-#             label="💾 Download Recovered Data",
+#             label="Download Recovered Data",
 #             data=recovered_df.to_csv(index=False),
 #             file_name="recovered_data.csv",
 #             mime="text/csv"
@@ -268,17 +265,17 @@ def prepare_download_data(results):
 #         st.info("No previous data found.")
 
 
-uploaded_file = st.file_uploader("📂 Upload CSV or Excel File With URLs", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader("Upload CSV or Excel File With URLs", type=["csv", "xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-        st.success("✅ File Loaded")
+        st.success("File Loaded")
         st.write("**Preview:**", df.head())
 
         url_column = st.selectbox("🔗 Select URL Column", df.columns)
 
-        if st.button("🚀 Start Extraction"):
+        if st.button("Start Extraction"):
             url_list = df[url_column].dropna().astype(str).tolist()
             total_urls = len(url_list)
             status = {
@@ -310,16 +307,16 @@ if uploaded_file:
                     # Real-time progress display
                     progress.progress(percent)
                     status_msg.markdown(
-                        f"🔍 Scanned Websites: **{status['scanned']} / {total_urls}**"
+                        f"Scanned Websites: **{status['scanned']} / {total_urls}**"
                     )
                     current_url_display.markdown(
-                        f"🌐 Currently Scanning: `{status['current']}`"
+                        f"Currently Scanning: `{status['current']}`"
                     )
                     valid_count_display.markdown(
-                        f"📥 Valid Emails Extracted: **{status['valid']}**"
+                        f"Valid Emails Extracted: **{status['valid']}**"
                     )
                     estimate_time_display.markdown(
-                        f"⏳ Estimated Time Remaining: **{mins} min {secs} sec**"
+                        f"Estimated Time Remaining: **{mins} min {secs} sec**"
                     )
                     await asyncio.sleep(0.5)
 
@@ -330,23 +327,23 @@ if uploaded_file:
                     update_ui()
                 )
 
-            with st.spinner("🔍 Extracting..."):
+            with st.spinner("Extracting..."):
                 try:
                     asyncio.run(main_runner())
                 except Exception as e:
-                    st.error("❌ Crash detected. Auto-saving current results.")
+                    st.error("Crash detected. Auto-saving current results.")
                     download_partial_results(results)
                     raise e
 
             valid_emails_count = sum(1 for r in results if r["Emails"] != "No Email Found")
-            st.success(f"✅ Completed: {status['count']} emails extracted from {valid_emails_count} websites.")
+            st.success(f"Completed: {status['valid']} emails found in {status['scanned']} websites scanned.")
 
             st.markdown("---")
             st.subheader("⬇ Download Full Results")
             file_data, mime_type, file_name = prepare_download_data(results)
-            st.download_button("💾 Download CSV", file_data, file_name, mime_type)
+            st.download_button("Download CSV", file_data, file_name, mime_type)
 
     except Exception as e:
-        st.error(f"❌ Error while processing file: {e}")
+        st.error(f"Error while processing file: {e}")
 else:
-    st.info("📂 Please upload a file with website URLs to start.")
+    st.info("Please upload a file with website URLs to start.")
