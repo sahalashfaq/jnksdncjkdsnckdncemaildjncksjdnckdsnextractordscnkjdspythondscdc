@@ -8,7 +8,8 @@ import json
 import os
 from bs4 import BeautifulSoup
 from io import BytesIO
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
+from collections import deque
 
 # Load CSS
 def load_css():
@@ -20,24 +21,13 @@ def load_css():
 
 load_css()
 
-
 # Regex patterns
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 FACEBOOK_REGEX = re.compile(r"https?://(www\.)?facebook\.com/[a-zA-Z0-9_\-./]+")
 LINKEDIN_REGEX = re.compile(r"https?://(www\.)?linkedin\.com/[a-zA-Z0-9_\-./]+")
+PRIVACY_EMAIL_REGEX = re.compile(r"(privacy|dpo|data\.protection|gdpr|compliance)@", re.IGNORECASE)
 
-# Load CSS (optional)
-def load_css():
-    try:
-        with open("style.css") as f:
-            st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
-    except:
-        st.warning("No CSS loaded.")
-
-load_css()
-
-# Excluded email list
-# List of emails to exclude (case-insensitive match)
+# Excluded email list (unchanged)
 excluded_emails = {
     "your@emailaddress.com",
     "info@domain.com",
@@ -143,7 +133,11 @@ excluded_emails = {
     "you@company-email.com",
     "your-email@domain.com",
     "myemail@mailservice.com",
-    "email@site.com"
+    "email@site.com",
+    "privacy@domain.com",
+    "data.protection@domain.com",
+    "gdpr@domain.com",
+    "compliance@domain.com"
 }
 
 # Save to simulated localStorage (JSON file)
@@ -162,22 +156,41 @@ def download_partial_results(results, filename="partial_results.csv"):
     if results:
         df = pd.DataFrame(results)
         df.to_csv(filename, index=False)
-        st.download_button("⬇ Download Partial Data", df.to_csv(index=False), filename, "text/csv")
+        st.download_button("Download Partial Data", df.to_csv(index=False), filename, "text/csv")
 
-# --- Scraper Function ---
-async def fetch_emails_from_url(url, session, semaphore, status, results, email_df_container):
-    extra_paths = ["", "/contact", "/about", "/team"]
+# --- Crawler Function to Fetch Up to User-Specified Pages ---
+async def crawl_website(url, session, semaphore, status, results, email_df_container, unique_emails, max_pages):
     collected_emails = set()
     facebook_url = ""
     linkedin_url = ""
+    visited_urls = set()
+    urls_to_visit = deque([(url, 0)])  # (url, depth)
+    max_depth = 3
+    base_domain = urlparse(url).netloc
+
+    # Common contact-related paths to prioritize
+    priority_paths = ["/contact", "/about", "/team", "/contact-us", "/get-in-touch", "/support"]
 
     try:
         async with semaphore:
-            for path in extra_paths:
-                full_url = urljoin(url.strip(), path)
-                status['current'] = full_url
+            # Add priority paths to crawl
+            for path in priority_paths:
+                full_url = urljoin(url, path)
+                if full_url not in visited_urls:
+                    urls_to_visit.append((full_url, 0))
+
+            while urls_to_visit and len(visited_urls) < max_pages:
+                current_url, depth = urls_to_visit.popleft()
+                if current_url in visited_urls or depth > max_depth:
+                    continue
+
+                visited_urls.add(current_url)
+                status['current'] = current_url
+
                 try:
-                    async with session.get(full_url, timeout=10) as response:
+                    async with session.get(current_url, timeout=10) as response:
+                        if response.status != 200:
+                            continue
                         html = await response.text()
                         soup = BeautifulSoup(html, "html.parser")
                         for tag in soup(["script", "style", "noscript"]):
@@ -190,9 +203,12 @@ async def fetch_emails_from_url(url, session, semaphore, status, results, email_
                         filtered_emails = {
                             email for email in found_emails
                             if email.lower() not in {e.lower() for e in excluded_emails}
+                            and not PRIVACY_EMAIL_REGEX.search(email.lower())
                         }
                         collected_emails.update(filtered_emails)
+                        unique_emails.update(filtered_emails)
 
+                        # Extract social media links
                         if not facebook_url:
                             match_fb = FACEBOOK_REGEX.search(html_links)
                             if match_fb:
@@ -203,8 +219,17 @@ async def fetch_emails_from_url(url, session, semaphore, status, results, email_
                             if match_ln:
                                 linkedin_url = match_ln.group()
 
-                except:
+                        # Find new links to crawl
+                        for a_tag in soup.find_all("a", href=True):
+                            href = a_tag["href"]
+                            full_url = urljoin(current_url, href)
+                            parsed_url = urlparse(full_url)
+                            if parsed_url.netloc == base_domain and full_url not in visited_urls:
+                                urls_to_visit.append((full_url, depth + 1))
+
+                except Exception:
                     continue
+
     except Exception:
         pass
     finally:
@@ -216,24 +241,22 @@ async def fetch_emails_from_url(url, session, semaphore, status, results, email_
             "Website": url,
             "Emails": email_str,
             "Facebook URL": facebook_str,
-            "LinkedIn URL": linkedin_str
+            "LinkedIn URL": linkedin_str,
+            "Pages Scanned": len(visited_urls)
         }
 
         results.append(result)
         save_to_local_storage(results)  # Save locally
         email_df_container.dataframe(pd.DataFrame(results))  # Live update
 
-        if collected_emails:
-           status['valid'] += 1
         status['scanned'] += 1
 
-
 # --- Async Batch Processor ---
-async def process_all_urls(urls, status, results, email_df_container):
-    semaphore = asyncio.Semaphore(10)
+async def process_all_urls(urls, status, results, email_df_container, unique_emails, max_pages):
+    semaphore = asyncio.Semaphore(5)
     async with aiohttp.ClientSession() as session:
         tasks = [
-            fetch_emails_from_url(url, session, semaphore, status, results, email_df_container)
+            crawl_website(url, session, semaphore, status, results, email_df_container, unique_emails, max_pages)
             for url in urls
         ]
         await asyncio.gather(*tasks)
@@ -245,26 +268,7 @@ def prepare_download_data(results):
     df.to_csv(output, index=False)
     return output.getvalue(), "text/csv", "emails_social_links.csv"
 
-
-# # Recover previous session
-# if st.sidebar.button("Recover Previous Data"):
-#     prev_data = load_from_local_storage()
-#     if prev_data:
-#         st.success("Recovered previous session")
-#         recovered_df = pd.DataFrame(prev_data)
-#         st.dataframe(recovered_df)
-
-#         # Download button for recovered data
-#         st.download_button(
-#             label="Download Recovered Data",
-#             data=recovered_df.to_csv(index=False),
-#             file_name="recovered_data.csv",
-#             mime="text/csv"
-#         )
-#     else:
-#         st.info("No previous data found.")
-
-
+# Main Streamlit app
 uploaded_file = st.file_uploader("Upload CSV or Excel File With URLs", type=["csv", "xlsx"])
 
 if uploaded_file:
@@ -273,17 +277,32 @@ if uploaded_file:
         st.success("File Loaded")
         st.write("**Preview:**", df.head())
 
-        url_column = st.selectbox("🔗 Select URL Column", df.columns)
+        url_column = st.selectbox("Select URL Column", df.columns)
+        max_pages = st.number_input("Maximum Pages to Scrape per Website", min_value=1, max_value=100, value=20, step=1)
+        st.markdown("""
+<style>
+    * {margin: 0px; padding: 0px;}
+</style>
+<p style='margin:0; padding:0;'>
+    The Number of maximum pages is directly proportional to the speed of Tool.
+</p>
+<p style='margin:0; padding:0;'>
+    &nbsp;&nbsp;&nbsp;∴ Max&nbsp;Pages&nbsp;∝&nbsp;Tool&nbsp;Speed ∝ Emails Efficieny
+</p>
+<p style='color:var(--indigo-color);'>
+    -Developer
+</p>
+""", unsafe_allow_html=True)
+
 
         if st.button("Start Extraction"):
             url_list = df[url_column].dropna().astype(str).tolist()
             total_urls = len(url_list)
             status = {
-                "valid": 0,      # emails found
-                "scanned": 0,    # total websites visited
+                "scanned": 0,
                 "current": ""
             }
-
+            unique_emails = set()  # Track unique emails across all websites
             results = []
 
             progress = st.progress(0)
@@ -292,7 +311,6 @@ if uploaded_file:
             estimate_time_display = st.empty()
             email_df_container = st.empty()
             valid_count_display = st.empty()
-
 
             start_time = time.time()
 
@@ -303,9 +321,9 @@ if uploaded_file:
                     avg_time = elapsed / max(1, status["scanned"])
                     remaining = avg_time * (total_urls - status["scanned"])
                     mins, secs = divmod(int(remaining), 60)
-            
+
                     # Real-time progress display
-                    progress.progress(percent)
+                    progress.progress(min(percent, 100))
                     status_msg.markdown(
                         f"Scanned Websites: **{status['scanned']} / {total_urls}**"
                     )
@@ -313,17 +331,16 @@ if uploaded_file:
                         f"Currently Scanning: `{status['current']}`"
                     )
                     valid_count_display.markdown(
-                        f"Valid Emails Extracted: **{status['valid']}**"
+                        f"Valid Emails Extracted: **{len(unique_emails)}**"
                     )
                     estimate_time_display.markdown(
                         f"Estimated Time Remaining: **{mins} min {secs} sec**"
                     )
                     await asyncio.sleep(0.5)
 
-
             async def main_runner():
                 await asyncio.gather(
-                    process_all_urls(url_list, status, results, email_df_container),
+                    process_all_urls(url_list, status, results, email_df_container, unique_emails, max_pages),
                     update_ui()
                 )
 
@@ -335,16 +352,15 @@ if uploaded_file:
                     download_partial_results(results)
                     raise e
 
-            valid_emails_count = sum(1 for r in results if r["Emails"] != "No Email Found")
-            st.success(f"Completed: {status['valid']} emails found in {status['scanned']} websites scanned.")
+            st.success(f"Completed: {len(unique_emails)} unique emails found in {status['scanned']} websites scanned.")
 
             st.markdown("---")
-            st.subheader("⬇ Download Full Results")
+            st.subheader("Download Full Results")
             file_data, mime_type, file_name = prepare_download_data(results)
             st.download_button("Download CSV", file_data, file_name, mime_type)
+        
 
     except Exception as e:
         st.error(f"Error while processing file: {e}")
 else:
-    st.info("Please upload a file with website URLs to start.")
-
+    st.write("")
